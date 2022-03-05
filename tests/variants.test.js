@@ -1,7 +1,8 @@
 import fs from 'fs'
 import path from 'path'
+import postcss from 'postcss'
 
-import { run, css, html } from './util/run'
+import { run, css, html, defaults } from './util/run'
 
 test('variants', () => {
   let config = {
@@ -417,6 +418,187 @@ test('before and after variants are a bit special, and forced to the end (2)', (
       :where(.prose-headings\:before\:text-center) :is(h1, h2, h3, h4)::before {
         content: var(--tw-content);
         text-align: center;
+      }
+    `)
+  })
+})
+
+it('should not generate variants of user css if it is not inside a layer', () => {
+  let config = {
+    content: [{ raw: html`<div class="hover:foo"></div>` }],
+    plugins: [],
+  }
+
+  let input = css`
+    @tailwind components;
+    @tailwind utilities;
+
+    .foo {
+      color: red;
+    }
+  `
+
+  return run(input, config).then((result) => {
+    return expect(result.css).toMatchFormattedCss(css`
+      .foo {
+        color: red;
+      }
+    `)
+  })
+})
+
+it('should be possible to use responsive modifiers that are defined with special characters', () => {
+  let config = {
+    content: [{ raw: html`<div class="<sm:underline"></div>` }],
+    theme: {
+      screens: {
+        '<sm': { max: '399px' },
+      },
+    },
+    plugins: [],
+  }
+
+  return run('@tailwind utilities', config).then((result) => {
+    return expect(result.css).toMatchFormattedCss(css`
+      @media (max-width: 399px) {
+        .\<sm\:underline {
+          text-decoration-line: underline;
+        }
+      }
+    `)
+  })
+})
+
+it('including just the base layer should not produce variants', () => {
+  let config = {
+    content: [{ raw: html`<div class="sm:container sm:underline"></div>` }],
+    corePlugins: { preflight: false },
+  }
+
+  return run('@tailwind base', config).then((result) => {
+    return expect(result.css).toMatchFormattedCss(
+      css`
+        ${defaults}
+      `
+    )
+  })
+})
+
+it('variants for components should not be produced in a file without a components layer', () => {
+  let config = {
+    content: [{ raw: html`<div class="sm:container sm:underline"></div>` }],
+  }
+
+  return run('@tailwind utilities', config).then((result) => {
+    return expect(result.css).toMatchFormattedCss(css`
+      @media (min-width: 640px) {
+        .sm\:underline {
+          text-decoration-line: underline;
+        }
+      }
+    `)
+  })
+})
+
+it('variants for utilities should not be produced in a file without a utilities layer', () => {
+  let config = {
+    content: [{ raw: html`<div class="sm:container sm:underline"></div>` }],
+  }
+
+  return run('@tailwind components', config).then((result) => {
+    return expect(result.css).toMatchFormattedCss(css`
+      @media (min-width: 640px) {
+        .sm\:container {
+          width: 100%;
+        }
+        @media (min-width: 640px) {
+          .sm\:container {
+            max-width: 640px;
+          }
+        }
+        @media (min-width: 768px) {
+          .sm\:container {
+            max-width: 768px;
+          }
+        }
+        @media (min-width: 1024px) {
+          .sm\:container {
+            max-width: 1024px;
+          }
+        }
+        @media (min-width: 1280px) {
+          .sm\:container {
+            max-width: 1280px;
+          }
+        }
+        @media (min-width: 1536px) {
+          .sm\:container {
+            max-width: 1536px;
+          }
+        }
+      }
+    `)
+  })
+})
+
+test('The visited variant removes opacity support', () => {
+  let config = {
+    content: [
+      {
+        raw: html`
+          <a class="visited:border-red-500 visited:bg-red-500 visited:text-red-500"
+            >Look, it's a link!</a
+          >
+        `,
+      },
+    ],
+    plugins: [],
+  }
+
+  return run('@tailwind utilities', config).then((result) => {
+    return expect(result.css).toMatchFormattedCss(css`
+      .visited\:border-red-500:visited {
+        border-color: rgb(239 68 68);
+      }
+      .visited\:bg-red-500:visited {
+        background-color: rgb(239 68 68);
+      }
+      .visited\:text-red-500:visited {
+        color: rgb(239 68 68);
+      }
+    `)
+  })
+})
+
+it('appends variants to the correct place when using postcss documents', () => {
+  let config = {
+    content: [{ raw: html`<div class="underline sm:underline"></div>` }],
+    plugins: [],
+    corePlugins: { preflight: false },
+  }
+
+  const doc = postcss.document()
+  doc.append(postcss.parse(`a {}`))
+  doc.append(postcss.parse(`@tailwind base`))
+  doc.append(postcss.parse(`@tailwind utilities`))
+  doc.append(postcss.parse(`b {}`))
+
+  const result = doc.toResult()
+
+  return run(result, config).then((result) => {
+    return expect(result.css).toMatchFormattedCss(css`
+      a {
+      }
+      ${defaults}
+      .underline {
+        text-decoration-line: underline;
+      }
+      @media (min-width: 640px) {
+        .sm\:underline {
+          text-decoration-line: underline;
+        }
+      }
+      b {
       }
     `)
   })

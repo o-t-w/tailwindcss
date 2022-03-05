@@ -2,34 +2,14 @@ import LRU from 'quick-lru'
 import * as sharedState from './sharedState'
 import { generateRules } from './generateRules'
 import bigSign from '../util/bigSign'
+import log from '../util/log'
 import cloneNodes from '../util/cloneNodes'
+import { defaultExtractor } from './defaultExtractor'
 
 let env = sharedState.env
 
-const PATTERNS = [
-  /([^<>"'`\s]*\[\w*'[^"`\s]*'?\])/.source, // font-['some_font',sans-serif]
-  /([^<>"'`\s]*\[\w*"[^"`\s]*"?\])/.source, // font-["some_font",sans-serif]
-  /([^<>"'`\s]*\[\w*\('[^"'`\s]*'\)\])/.source, // bg-[url('...')]
-  /([^<>"'`\s]*\[\w*\("[^"'`\s]*"\)\])/.source, // bg-[url("...")]
-  /([^<>"'`\s]*\[\w*\('[^"`\s]*'\)\])/.source, // bg-[url('...'),url('...')]
-  /([^<>"'`\s]*\[\w*\("[^'`\s]*"\)\])/.source, // bg-[url("..."),url("...")]
-  /([^<>"'`\s]*\['[^"'`\s]*'\])/.source, // `content-['hello']` but not `content-['hello']']`
-  /([^<>"'`\s]*\["[^"'`\s]*"\])/.source, // `content-["hello"]` but not `content-["hello"]"]`
-  /([^<>"'`\s]*\[[^<>"'`\s]*:'[^"'`\s]*'\])/.source, // `[content:'hello']` but not `[content:"hello"]`
-  /([^<>"'`\s]*\[[^<>"'`\s]*:"[^"'`\s]*"\])/.source, // `[content:"hello"]` but not `[content:'hello']`
-  /([^<>"'`\s]*\[[^"'`\s]+\][^<>"'`\s]*)/.source, // `fill-[#bada55]`, `fill-[#bada55]/50`
-  /([^<>"'`\s]*[^"'`\s:])/.source, //  `px-1.5`, `uppercase` but not `uppercase:`
-].join('|')
-const BROAD_MATCH_GLOBAL_REGEXP = new RegExp(PATTERNS, 'g')
-const INNER_MATCH_GLOBAL_REGEXP = /[^<>"'`\s.(){}[\]#=%]*[^<>"'`\s.(){}[\]#=%:]/g
-
 const builtInExtractors = {
-  DEFAULT: (content) => {
-    let broadMatches = content.match(BROAD_MATCH_GLOBAL_REGEXP) || []
-    let innerMatches = content.match(INNER_MATCH_GLOBAL_REGEXP) || []
-
-    return [...broadMatches, ...innerMatches]
-  },
+  DEFAULT: defaultExtractor,
 }
 
 const builtInTransformers = {
@@ -99,6 +79,7 @@ function buildStylesheet(rules, context) {
 
   let returnValue = {
     base: new Set(),
+    defaults: new Set(),
     components: new Set(),
     utilities: new Set(),
     variants: new Set(),
@@ -122,6 +103,11 @@ function buildStylesheet(rules, context) {
 
     if (sort & context.layerOrder.base) {
       returnValue.base.add(rule)
+      continue
+    }
+
+    if (sort & context.layerOrder.defaults) {
+      returnValue.defaults.add(rule)
       continue
     }
 
@@ -153,13 +139,15 @@ export default function expandTailwindAtRules(context) {
       variants: null,
     }
 
-    // Make sure this file contains Tailwind directives. If not, we can save
-    // a lot of work and bail early. Also we don't have to register our touch
-    // file as a dependency since the output of this CSS does not depend on
-    // the source of any templates. Think Vue <style> blocks for example.
-    root.walkAtRules('tailwind', (rule) => {
-      if (Object.keys(layerNodes).includes(rule.params)) {
-        layerNodes[rule.params] = rule
+    root.walkAtRules((rule) => {
+      // Make sure this file contains Tailwind directives. If not, we can save
+      // a lot of work and bail early. Also we don't have to register our touch
+      // file as a dependency since the output of this CSS does not depend on
+      // the source of any templates. Think Vue <style> blocks for example.
+      if (rule.name === 'tailwind') {
+        if (Object.keys(layerNodes).includes(rule.params)) {
+          layerNodes[rule.params] = rule
+        }
       }
     })
 
@@ -170,7 +158,7 @@ export default function expandTailwindAtRules(context) {
     // ---
 
     // Find potential rules in changed files
-    let candidates = new Set(['*'])
+    let candidates = new Set([sharedState.NOT_ON_DEMAND])
     let seen = new Set()
 
     env.DEBUG && console.time('Reading changed files')
@@ -180,6 +168,8 @@ export default function expandTailwindAtRules(context) {
       let extractor = getExtractor(context.tailwindConfig, extension)
       getClassCandidates(transformer(content), extractor, candidates, seen)
     }
+
+    env.DEBUG && console.timeEnd('Reading changed files')
 
     // ---
 
@@ -202,6 +192,7 @@ export default function expandTailwindAtRules(context) {
     env.DEBUG && console.timeEnd('Build stylesheet')
 
     let {
+      defaults: defaultNodes,
       base: baseNodes,
       components: componentNodes,
       utilities: utilityNodes,
@@ -213,25 +204,72 @@ export default function expandTailwindAtRules(context) {
     // Replace any Tailwind directives with generated CSS
 
     if (layerNodes.base) {
-      layerNodes.base.before(cloneNodes([...baseNodes], layerNodes.base.source))
+      layerNodes.base.before(
+        cloneNodes([...baseNodes, ...defaultNodes], layerNodes.base.source, {
+          layer: 'base',
+        })
+      )
       layerNodes.base.remove()
     }
 
     if (layerNodes.components) {
-      layerNodes.components.before(cloneNodes([...componentNodes], layerNodes.components.source))
+      layerNodes.components.before(
+        cloneNodes([...componentNodes], layerNodes.components.source, {
+          layer: 'components',
+        })
+      )
       layerNodes.components.remove()
     }
 
     if (layerNodes.utilities) {
-      layerNodes.utilities.before(cloneNodes([...utilityNodes], layerNodes.utilities.source))
+      layerNodes.utilities.before(
+        cloneNodes([...utilityNodes], layerNodes.utilities.source, {
+          layer: 'utilities',
+        })
+      )
       layerNodes.utilities.remove()
     }
 
+    // We do post-filtering to not alter the emitted order of the variants
+    const variantNodes = Array.from(screenNodes).filter((node) => {
+      const parentLayer = node.raws.tailwind?.parentLayer
+
+      if (parentLayer === 'components') {
+        return layerNodes.components !== null
+      }
+
+      if (parentLayer === 'utilities') {
+        return layerNodes.utilities !== null
+      }
+
+      return true
+    })
+
     if (layerNodes.variants) {
-      layerNodes.variants.before(cloneNodes([...screenNodes], layerNodes.variants.source))
+      layerNodes.variants.before(
+        cloneNodes(variantNodes, layerNodes.variants.source, {
+          layer: 'variants',
+        })
+      )
       layerNodes.variants.remove()
-    } else {
-      root.append(cloneNodes([...screenNodes], root.source))
+    } else if (variantNodes.length > 0) {
+      root.append(
+        cloneNodes(variantNodes, root.source, {
+          layer: 'variants',
+        })
+      )
+    }
+
+    // If we've got a utility layer and no utilities are generated there's likely something wrong
+    const hasUtilityVariants = variantNodes.some(
+      (node) => node.raws.tailwind?.parentLayer === 'utilities'
+    )
+
+    if (layerNodes.utilities && utilityNodes.size === 0 && !hasUtilityVariants) {
+      log.warn('content-problems', [
+        'No utility classes were detected in your source files. If this is unexpected, double-check the `content` option in your Tailwind CSS configuration.',
+        'https://tailwindcss.com/docs/content-configuration',
+      ])
     }
 
     // ---

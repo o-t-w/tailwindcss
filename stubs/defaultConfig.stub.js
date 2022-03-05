@@ -194,6 +194,9 @@ module.exports = {
       '3xl': '1.5rem',
       full: '9999px',
     },
+    borderSpacing: ({ theme }) => ({
+      ...theme('spacing'),
+    }),
     borderWidth: {
       DEFAULT: '1px',
       0: '0px',
@@ -854,8 +857,8 @@ module.exports = {
       none: 'none',
       all: 'all',
       DEFAULT:
-        'background-color, border-color, color, fill, stroke, opacity, box-shadow, transform, filter, backdrop-filter',
-      colors: 'background-color, border-color, color, fill, stroke',
+        'color, background-color, border-color, text-decoration-color, fill, stroke, opacity, box-shadow, transform, filter, backdrop-filter',
+      colors: 'color, background-color, border-color, text-decoration-color, fill, stroke',
       opacity: 'opacity',
       shadow: 'box-shadow',
       transform: 'transform',

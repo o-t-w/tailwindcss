@@ -3,6 +3,7 @@ import * as path from 'path'
 import postcss from 'postcss'
 import createUtilityPlugin from './util/createUtilityPlugin'
 import buildMediaQuery from './util/buildMediaQuery'
+import escapeClassName from './util/escapeClassName'
 import parseAnimationValue from './util/parseAnimationValue'
 import flattenColorPalette from './util/flattenColorPalette'
 import withAlphaVariable, { withAlphaValue } from './util/withAlphaVariable'
@@ -70,7 +71,28 @@ export let variantPlugins = {
       'only-of-type',
 
       // State
-      'visited',
+      [
+        'visited',
+        ({ container }) => {
+          let toRemove = ['--tw-text-opacity', '--tw-border-opacity', '--tw-bg-opacity']
+
+          container.walkDecls((decl) => {
+            if (toRemove.includes(decl.prop)) {
+              decl.remove()
+
+              return
+            }
+
+            for (const varName of toRemove) {
+              if (decl.value.includes(`/ var(${varName})`)) {
+                decl.value = decl.value.replace(`/ var(${varName})`, '')
+              }
+            }
+          })
+
+          return ':visited'
+        },
+      ],
       'target',
       ['open', '[open]'],
 
@@ -100,15 +122,27 @@ export let variantPlugins = {
     ].map((variant) => (Array.isArray(variant) ? variant : [variant, `:${variant}`]))
 
     for (let [variantName, state] of pseudoVariants) {
-      addVariant(variantName, `&${state}`)
+      addVariant(variantName, (ctx) => {
+        let result = typeof state === 'function' ? state(ctx) : state
+
+        return `&${result}`
+      })
     }
 
     for (let [variantName, state] of pseudoVariants) {
-      addVariant(`group-${variantName}`, `:merge(.group)${state} &`)
+      addVariant(`group-${variantName}`, (ctx) => {
+        let result = typeof state === 'function' ? state(ctx) : state
+
+        return `:merge(.group)${result} &`
+      })
     }
 
     for (let [variantName, state] of pseudoVariants) {
-      addVariant(`peer-${variantName}`, `:merge(.peer)${state} ~ &`)
+      addVariant(`peer-${variantName}`, (ctx) => {
+        let result = typeof state === 'function' ? state(ctx) : state
+
+        return `:merge(.peer)${result} ~ &`
+      })
     }
   },
 
@@ -138,17 +172,19 @@ export let variantPlugins = {
   },
 
   darkVariants: ({ config, addVariant }) => {
-    let mode = config('darkMode', 'media')
+    let [mode, className = '.dark'] = [].concat(config('darkMode', 'media'))
+
     if (mode === false) {
       mode = 'media'
       log.warn('darkmode-false', [
         'The `darkMode` option in your Tailwind CSS configuration is set to `false`, which now behaves the same as `media`.',
         'Change `darkMode` to `media` or remove it entirely.',
+        'https://tailwindcss.com/docs/upgrade-guide#remove-dark-mode-configuration',
       ])
     }
 
     if (mode === 'class') {
-      addVariant('dark', '.dark &')
+      addVariant('dark', `${className} &`)
     } else if (mode === 'media') {
       addVariant('dark', '@media (prefers-color-scheme: dark)')
     }
@@ -171,6 +207,39 @@ export let variantPlugins = {
     addVariant('landscape', '@media (orientation: landscape)')
   },
 }
+
+let cssTransformValue = [
+  'translate(var(--tw-translate-x), var(--tw-translate-y))',
+  'rotate(var(--tw-rotate))',
+  'skewX(var(--tw-skew-x))',
+  'skewY(var(--tw-skew-y))',
+  'scaleX(var(--tw-scale-x))',
+  'scaleY(var(--tw-scale-y))',
+].join(' ')
+
+let cssFilterValue = [
+  'var(--tw-blur)',
+  'var(--tw-brightness)',
+  'var(--tw-contrast)',
+  'var(--tw-grayscale)',
+  'var(--tw-hue-rotate)',
+  'var(--tw-invert)',
+  'var(--tw-saturate)',
+  'var(--tw-sepia)',
+  'var(--tw-drop-shadow)',
+].join(' ')
+
+let cssBackdropFilterValue = [
+  'var(--tw-backdrop-blur)',
+  'var(--tw-backdrop-brightness)',
+  'var(--tw-backdrop-contrast)',
+  'var(--tw-backdrop-grayscale)',
+  'var(--tw-backdrop-hue-rotate)',
+  'var(--tw-backdrop-invert)',
+  'var(--tw-backdrop-opacity)',
+  'var(--tw-backdrop-saturate)',
+  'var(--tw-backdrop-sepia)',
+].join(' ')
 
 export let corePlugins = {
   preflight: ({ addBase }) => {
@@ -460,6 +529,41 @@ export let corePlugins = {
     })
   },
 
+  borderSpacing: ({ addDefaults, matchUtilities, theme }) => {
+    addDefaults('border-spacing', {
+      '--tw-border-spacing-x': 0,
+      '--tw-border-spacing-y': 0,
+    })
+
+    matchUtilities(
+      {
+        'border-spacing': (value) => {
+          return {
+            '--tw-border-spacing-x': value,
+            '--tw-border-spacing-y': value,
+            '@defaults border-spacing': {},
+            'border-spacing': 'var(--tw-border-spacing-x) var(--tw-border-spacing-y)',
+          }
+        },
+        'border-spacing-x': (value) => {
+          return {
+            '--tw-border-spacing-x': value,
+            '@defaults border-spacing': {},
+            'border-spacing': 'var(--tw-border-spacing-x) var(--tw-border-spacing-y)',
+          }
+        },
+        'border-spacing-y': (value) => {
+          return {
+            '--tw-border-spacing-y': value,
+            '@defaults border-spacing': {},
+            'border-spacing': 'var(--tw-border-spacing-x) var(--tw-border-spacing-y)',
+          }
+        },
+      },
+      { values: theme('borderSpacing') }
+    )
+  },
+
   transformOrigin: createUtilityPlugin('transformOrigin', [['origin', ['transformOrigin']]]),
   translate: createUtilityPlugin(
     'translate',
@@ -467,11 +571,11 @@ export let corePlugins = {
       [
         [
           'translate-x',
-          [['@defaults transform', {}], '--tw-translate-x', ['transform', 'var(--tw-transform)']],
+          [['@defaults transform', {}], '--tw-translate-x', ['transform', cssTransformValue]],
         ],
         [
           'translate-y',
-          [['@defaults transform', {}], '--tw-translate-y', ['transform', 'var(--tw-transform)']],
+          [['@defaults transform', {}], '--tw-translate-y', ['transform', cssTransformValue]],
         ],
       ],
     ],
@@ -479,26 +583,15 @@ export let corePlugins = {
   ),
   rotate: createUtilityPlugin(
     'rotate',
-    [
-      [
-        'rotate',
-        [['@defaults transform', {}], '--tw-rotate', ['transform', 'var(--tw-transform)']],
-      ],
-    ],
+    [['rotate', [['@defaults transform', {}], '--tw-rotate', ['transform', cssTransformValue]]]],
     { supportsNegativeValues: true }
   ),
   skew: createUtilityPlugin(
     'skew',
     [
       [
-        [
-          'skew-x',
-          [['@defaults transform', {}], '--tw-skew-x', ['transform', 'var(--tw-transform)']],
-        ],
-        [
-          'skew-y',
-          [['@defaults transform', {}], '--tw-skew-y', ['transform', 'var(--tw-transform)']],
-        ],
+        ['skew-x', [['@defaults transform', {}], '--tw-skew-x', ['transform', cssTransformValue]]],
+        ['skew-y', [['@defaults transform', {}], '--tw-skew-y', ['transform', cssTransformValue]]],
       ],
     ],
     { supportsNegativeValues: true }
@@ -512,73 +605,51 @@ export let corePlugins = {
           ['@defaults transform', {}],
           '--tw-scale-x',
           '--tw-scale-y',
-          ['transform', 'var(--tw-transform)'],
+          ['transform', cssTransformValue],
         ],
       ],
       [
         [
           'scale-x',
-          [['@defaults transform', {}], '--tw-scale-x', ['transform', 'var(--tw-transform)']],
+          [['@defaults transform', {}], '--tw-scale-x', ['transform', cssTransformValue]],
         ],
         [
           'scale-y',
-          [['@defaults transform', {}], '--tw-scale-y', ['transform', 'var(--tw-transform)']],
+          [['@defaults transform', {}], '--tw-scale-y', ['transform', cssTransformValue]],
         ],
       ],
     ],
     { supportsNegativeValues: true }
   ),
 
-  transform: ({ addBase, addUtilities }) => {
-    addBase({
-      '@defaults transform': {
-        '--tw-translate-x': '0',
-        '--tw-translate-y': '0',
-        '--tw-rotate': '0',
-        '--tw-skew-x': '0',
-        '--tw-skew-y': '0',
-        '--tw-scale-x': '1',
-        '--tw-scale-y': '1',
-        '--tw-transform': [
-          'translateX(var(--tw-translate-x))',
-          'translateY(var(--tw-translate-y))',
-          'rotate(var(--tw-rotate))',
-          'skewX(var(--tw-skew-x))',
-          'skewY(var(--tw-skew-y))',
-          'scaleX(var(--tw-scale-x))',
-          'scaleY(var(--tw-scale-y))',
-        ].join(' '),
-      },
+  transform: ({ addDefaults, addUtilities }) => {
+    addDefaults('transform', {
+      '--tw-translate-x': '0',
+      '--tw-translate-y': '0',
+      '--tw-rotate': '0',
+      '--tw-skew-x': '0',
+      '--tw-skew-y': '0',
+      '--tw-scale-x': '1',
+      '--tw-scale-y': '1',
     })
+
     addUtilities({
-      '.transform': { '@defaults transform': {}, transform: 'var(--tw-transform)' },
+      '.transform': { '@defaults transform': {}, transform: cssTransformValue },
       '.transform-cpu': {
-        '--tw-transform': [
-          'translateX(var(--tw-translate-x))',
-          'translateY(var(--tw-translate-y))',
-          'rotate(var(--tw-rotate))',
-          'skewX(var(--tw-skew-x))',
-          'skewY(var(--tw-skew-y))',
-          'scaleX(var(--tw-scale-x))',
-          'scaleY(var(--tw-scale-y))',
-        ].join(' '),
+        transform: cssTransformValue,
       },
       '.transform-gpu': {
-        '--tw-transform': [
-          'translate3d(var(--tw-translate-x), var(--tw-translate-y), 0)',
-          'rotate(var(--tw-rotate))',
-          'skewX(var(--tw-skew-x))',
-          'skewY(var(--tw-skew-y))',
-          'scaleX(var(--tw-scale-x))',
-          'scaleY(var(--tw-scale-y))',
-        ].join(' '),
+        transform: cssTransformValue.replace(
+          'translate(var(--tw-translate-x), var(--tw-translate-y))',
+          'translate3d(var(--tw-translate-x), var(--tw-translate-y), 0)'
+        ),
       },
       '.transform-none': { transform: 'none' },
     })
   },
 
-  animation: ({ matchUtilities, theme, prefix }) => {
-    let prefixName = (name) => prefix(`.${name}`).slice(1)
+  animation: ({ matchUtilities, theme, config }) => {
+    let prefixName = (name) => `${config('prefix')}${escapeClassName(name)}`
     let keyframes = Object.fromEntries(
       Object.entries(theme('keyframes') ?? {}).map(([key, value]) => {
         return [key, { [`@keyframes ${prefixName(key)}`]: value }]
@@ -611,15 +682,14 @@ export let corePlugins = {
 
   cursor: createUtilityPlugin('cursor'),
 
-  touchAction: ({ addBase, addUtilities }) => {
-    addBase({
-      '@defaults touch-action': {
-        '--tw-pan-x': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-pan-y': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-pinch-zoom': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-touch-action': 'var(--tw-pan-x) var(--tw-pan-y) var(--tw-pinch-zoom)',
-      },
+  touchAction: ({ addDefaults, addUtilities }) => {
+    addDefaults('touch-action', {
+      '--tw-pan-x': ' ',
+      '--tw-pan-y': ' ',
+      '--tw-pinch-zoom': ' ',
     })
+
+    let cssTouchActionValue = 'var(--tw-pan-x) var(--tw-pan-y) var(--tw-pinch-zoom)'
 
     addUtilities({
       '.touch-auto': { 'touch-action': 'auto' },
@@ -627,37 +697,37 @@ export let corePlugins = {
       '.touch-pan-x': {
         '@defaults touch-action': {},
         '--tw-pan-x': 'pan-x',
-        'touch-action': 'var(--tw-touch-action)',
+        'touch-action': cssTouchActionValue,
       },
       '.touch-pan-left': {
         '@defaults touch-action': {},
         '--tw-pan-x': 'pan-left',
-        'touch-action': 'var(--tw-touch-action)',
+        'touch-action': cssTouchActionValue,
       },
       '.touch-pan-right': {
         '@defaults touch-action': {},
         '--tw-pan-x': 'pan-right',
-        'touch-action': 'var(--tw-touch-action)',
+        'touch-action': cssTouchActionValue,
       },
       '.touch-pan-y': {
         '@defaults touch-action': {},
         '--tw-pan-y': 'pan-y',
-        'touch-action': 'var(--tw-touch-action)',
+        'touch-action': cssTouchActionValue,
       },
       '.touch-pan-up': {
         '@defaults touch-action': {},
         '--tw-pan-y': 'pan-up',
-        'touch-action': 'var(--tw-touch-action)',
+        'touch-action': cssTouchActionValue,
       },
       '.touch-pan-down': {
         '@defaults touch-action': {},
         '--tw-pan-y': 'pan-down',
-        'touch-action': 'var(--tw-touch-action)',
+        'touch-action': cssTouchActionValue,
       },
       '.touch-pinch-zoom': {
         '@defaults touch-action': {},
         '--tw-pinch-zoom': 'pinch-zoom',
-        'touch-action': 'var(--tw-touch-action)',
+        'touch-action': cssTouchActionValue,
       },
       '.touch-manipulation': { 'touch-action': 'manipulation' },
     })
@@ -681,11 +751,9 @@ export let corePlugins = {
     })
   },
 
-  scrollSnapType: ({ addUtilities, addBase }) => {
-    addBase({
-      '@defaults scroll-snap-type': {
-        '--tw-scroll-snap-strictness': 'proximity',
-      },
+  scrollSnapType: ({ addDefaults, addUtilities }) => {
+    addDefaults('scroll-snap-type', {
+      '--tw-scroll-snap-strictness': 'proximity',
     })
 
     addUtilities({
@@ -1182,24 +1250,7 @@ export let corePlugins = {
     })
   },
 
-  borderColor: ({ addBase, matchUtilities, theme, corePlugins }) => {
-    if (!corePlugins('borderOpacity')) {
-      let value = theme('borderColor.DEFAULT', 'currentColor')
-      addBase({
-        '@defaults border-width': {
-          'border-color': toColorValue(value),
-        },
-      })
-    } else {
-      addBase({
-        '@defaults border-width': withAlphaVariable({
-          color: theme('borderColor.DEFAULT', 'currentColor'),
-          property: 'border-color',
-          variable: '--tw-border-opacity',
-        }),
-      })
-    }
-
+  borderColor: ({ matchUtilities, theme, corePlugins }) => {
     matchUtilities(
       {
         border: (value) => {
@@ -1508,6 +1559,8 @@ export let corePlugins = {
       '.text-center': { 'text-align': 'center' },
       '.text-right': { 'text-align': 'right' },
       '.text-justify': { 'text-align': 'justify' },
+      '.text-start': { 'text-align': 'start' },
+      '.text-end': { 'text-align': 'end' },
     })
   },
 
@@ -1577,57 +1630,59 @@ export let corePlugins = {
     })
   },
 
-  fontVariantNumeric: ({ addUtilities }) => {
+  fontVariantNumeric: ({ addDefaults, addUtilities }) => {
+    let cssFontVariantNumericValue =
+      'var(--tw-ordinal) var(--tw-slashed-zero) var(--tw-numeric-figure) var(--tw-numeric-spacing) var(--tw-numeric-fraction)'
+
+    addDefaults('font-variant-numeric', {
+      '--tw-ordinal': ' ',
+      '--tw-slashed-zero': ' ',
+      '--tw-numeric-figure': ' ',
+      '--tw-numeric-spacing': ' ',
+      '--tw-numeric-fraction': ' ',
+    })
+
     addUtilities({
-      '@defaults font-variant-numeric': {
-        '--tw-ordinal': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-slashed-zero': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-numeric-figure': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-numeric-spacing': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-numeric-fraction': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-font-variant-numeric':
-          'var(--tw-ordinal) var(--tw-slashed-zero) var(--tw-numeric-figure) var(--tw-numeric-spacing) var(--tw-numeric-fraction)',
-      },
       '.normal-nums': { 'font-variant-numeric': 'normal' },
       '.ordinal': {
         '@defaults font-variant-numeric': {},
         '--tw-ordinal': 'ordinal',
-        'font-variant-numeric': 'var(--tw-font-variant-numeric)',
+        'font-variant-numeric': cssFontVariantNumericValue,
       },
       '.slashed-zero': {
         '@defaults font-variant-numeric': {},
         '--tw-slashed-zero': 'slashed-zero',
-        'font-variant-numeric': 'var(--tw-font-variant-numeric)',
+        'font-variant-numeric': cssFontVariantNumericValue,
       },
       '.lining-nums': {
         '@defaults font-variant-numeric': {},
         '--tw-numeric-figure': 'lining-nums',
-        'font-variant-numeric': 'var(--tw-font-variant-numeric)',
+        'font-variant-numeric': cssFontVariantNumericValue,
       },
       '.oldstyle-nums': {
         '@defaults font-variant-numeric': {},
         '--tw-numeric-figure': 'oldstyle-nums',
-        'font-variant-numeric': 'var(--tw-font-variant-numeric)',
+        'font-variant-numeric': cssFontVariantNumericValue,
       },
       '.proportional-nums': {
         '@defaults font-variant-numeric': {},
         '--tw-numeric-spacing': 'proportional-nums',
-        'font-variant-numeric': 'var(--tw-font-variant-numeric)',
+        'font-variant-numeric': cssFontVariantNumericValue,
       },
       '.tabular-nums': {
         '@defaults font-variant-numeric': {},
         '--tw-numeric-spacing': 'tabular-nums',
-        'font-variant-numeric': 'var(--tw-font-variant-numeric)',
+        'font-variant-numeric': cssFontVariantNumericValue,
       },
       '.diagonal-fractions': {
         '@defaults font-variant-numeric': {},
         '--tw-numeric-fraction': 'diagonal-fractions',
-        'font-variant-numeric': 'var(--tw-font-variant-numeric)',
+        'font-variant-numeric': cssFontVariantNumericValue,
       },
       '.stacked-fractions': {
         '@defaults font-variant-numeric': {},
         '--tw-numeric-fraction': 'stacked-fractions',
-        'font-variant-numeric': 'var(--tw-font-variant-numeric)',
+        'font-variant-numeric': cssFontVariantNumericValue,
       },
     })
   },
@@ -1823,14 +1878,12 @@ export let corePlugins = {
       `var(--tw-shadow)`,
     ].join(', ')
 
-    return function ({ matchUtilities, addBase, theme }) {
-      addBase({
-        '@defaults box-shadow': {
-          '--tw-ring-offset-shadow': '0 0 #0000',
-          '--tw-ring-shadow': '0 0 #0000',
-          '--tw-shadow': '0 0 #0000',
-          '--tw-shadow-colored': '0 0 #0000',
-        },
+    return function ({ matchUtilities, addDefaults, theme }) {
+      addDefaults(' box-shadow', {
+        '--tw-ring-offset-shadow': '0 0 #0000',
+        '--tw-ring-shadow': '0 0 #0000',
+        '--tw-shadow': '0 0 #0000',
+        '--tw-shadow-colored': '0 0 #0000',
       })
 
       matchUtilities(
@@ -1908,25 +1961,23 @@ export let corePlugins = {
     )
   },
 
-  ringWidth: ({ matchUtilities, addBase, addUtilities, theme }) => {
+  ringWidth: ({ matchUtilities, addDefaults, addUtilities, theme }) => {
     let ringOpacityDefault = theme('ringOpacity.DEFAULT', '0.5')
     let ringColorDefault = withAlphaValue(
-      theme('ringColor.DEFAULT'),
+      theme('ringColor')?.DEFAULT,
       ringOpacityDefault,
       `rgb(147 197 253 / ${ringOpacityDefault})`
     )
 
-    addBase({
-      '@defaults ring-width': {
-        '--tw-ring-inset': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-ring-offset-width': theme('ringOffsetWidth.DEFAULT', '0px'),
-        '--tw-ring-offset-color': theme('ringOffsetColor.DEFAULT', '#fff'),
-        '--tw-ring-color': ringColorDefault,
-        '--tw-ring-offset-shadow': '0 0 #0000',
-        '--tw-ring-shadow': '0 0 #0000',
-        '--tw-shadow': '0 0 #0000',
-        '--tw-shadow-colored': '0 0 #0000',
-      },
+    addDefaults('ring-width', {
+      '--tw-ring-inset': ' ',
+      '--tw-ring-offset-width': theme('ringOffsetWidth.DEFAULT', '0px'),
+      '--tw-ring-offset-color': theme('ringOffsetColor.DEFAULT', '#fff'),
+      '--tw-ring-color': ringColorDefault,
+      '--tw-ring-offset-shadow': '0 0 #0000',
+      '--tw-ring-shadow': '0 0 #0000',
+      '--tw-shadow': '0 0 #0000',
+      '--tw-shadow-colored': '0 0 #0000',
     })
 
     matchUtilities(
@@ -1952,10 +2003,16 @@ export let corePlugins = {
     })
   },
 
-  ringColor: ({ matchUtilities, theme }) => {
+  ringColor: ({ matchUtilities, theme, corePlugins }) => {
     matchUtilities(
       {
         ring: (value) => {
+          if (!corePlugins('ringOpacity')) {
+            return {
+              '--tw-ring-color': toColorValue(value),
+            }
+          }
+
           return withAlphaVariable({
             color: value,
             property: '--tw-ring-color',
@@ -2003,7 +2060,7 @@ export let corePlugins = {
           return {
             '--tw-blur': `blur(${value})`,
             '@defaults filter': {},
-            filter: 'var(--tw-filter)',
+            filter: cssFilterValue,
           }
         },
       },
@@ -2018,7 +2075,7 @@ export let corePlugins = {
           return {
             '--tw-brightness': `brightness(${value})`,
             '@defaults filter': {},
-            filter: 'var(--tw-filter)',
+            filter: cssFilterValue,
           }
         },
       },
@@ -2033,7 +2090,7 @@ export let corePlugins = {
           return {
             '--tw-contrast': `contrast(${value})`,
             '@defaults filter': {},
-            filter: 'var(--tw-filter)',
+            filter: cssFilterValue,
           }
         },
       },
@@ -2050,7 +2107,7 @@ export let corePlugins = {
               ? value.map((v) => `drop-shadow(${v})`).join(' ')
               : `drop-shadow(${value})`,
             '@defaults filter': {},
-            filter: 'var(--tw-filter)',
+            filter: cssFilterValue,
           }
         },
       },
@@ -2065,7 +2122,7 @@ export let corePlugins = {
           return {
             '--tw-grayscale': `grayscale(${value})`,
             '@defaults filter': {},
-            filter: 'var(--tw-filter)',
+            filter: cssFilterValue,
           }
         },
       },
@@ -2080,7 +2137,7 @@ export let corePlugins = {
           return {
             '--tw-hue-rotate': `hue-rotate(${value})`,
             '@defaults filter': {},
-            filter: 'var(--tw-filter)',
+            filter: cssFilterValue,
           }
         },
       },
@@ -2095,7 +2152,7 @@ export let corePlugins = {
           return {
             '--tw-invert': `invert(${value})`,
             '@defaults filter': {},
-            filter: 'var(--tw-filter)',
+            filter: cssFilterValue,
           }
         },
       },
@@ -2110,7 +2167,7 @@ export let corePlugins = {
           return {
             '--tw-saturate': `saturate(${value})`,
             '@defaults filter': {},
-            filter: 'var(--tw-filter)',
+            filter: cssFilterValue,
           }
         },
       },
@@ -2125,7 +2182,7 @@ export let corePlugins = {
           return {
             '--tw-sepia': `sepia(${value})`,
             '@defaults filter': {},
-            filter: 'var(--tw-filter)',
+            filter: cssFilterValue,
           }
         },
       },
@@ -2133,33 +2190,20 @@ export let corePlugins = {
     )
   },
 
-  filter: ({ addBase, addUtilities }) => {
-    addBase({
-      '@defaults filter': {
-        '--tw-blur': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-brightness': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-contrast': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-grayscale': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-hue-rotate': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-invert': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-saturate': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-sepia': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-drop-shadow': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-filter': [
-          'var(--tw-blur)',
-          'var(--tw-brightness)',
-          'var(--tw-contrast)',
-          'var(--tw-grayscale)',
-          'var(--tw-hue-rotate)',
-          'var(--tw-invert)',
-          'var(--tw-saturate)',
-          'var(--tw-sepia)',
-          'var(--tw-drop-shadow)',
-        ].join(' '),
-      },
+  filter: ({ addDefaults, addUtilities }) => {
+    addDefaults('filter', {
+      '--tw-blur': ' ',
+      '--tw-brightness': ' ',
+      '--tw-contrast': ' ',
+      '--tw-grayscale': ' ',
+      '--tw-hue-rotate': ' ',
+      '--tw-invert': ' ',
+      '--tw-saturate': ' ',
+      '--tw-sepia': ' ',
+      '--tw-drop-shadow': ' ',
     })
     addUtilities({
-      '.filter': { '@defaults filter': {}, filter: 'var(--tw-filter)' },
+      '.filter': { '@defaults filter': {}, filter: cssFilterValue },
       '.filter-none': { filter: 'none' },
     })
   },
@@ -2171,7 +2215,7 @@ export let corePlugins = {
           return {
             '--tw-backdrop-blur': `blur(${value})`,
             '@defaults backdrop-filter': {},
-            'backdrop-filter': 'var(--tw-backdrop-filter)',
+            'backdrop-filter': cssBackdropFilterValue,
           }
         },
       },
@@ -2186,7 +2230,7 @@ export let corePlugins = {
           return {
             '--tw-backdrop-brightness': `brightness(${value})`,
             '@defaults backdrop-filter': {},
-            'backdrop-filter': 'var(--tw-backdrop-filter)',
+            'backdrop-filter': cssBackdropFilterValue,
           }
         },
       },
@@ -2201,7 +2245,7 @@ export let corePlugins = {
           return {
             '--tw-backdrop-contrast': `contrast(${value})`,
             '@defaults backdrop-filter': {},
-            'backdrop-filter': 'var(--tw-backdrop-filter)',
+            'backdrop-filter': cssBackdropFilterValue,
           }
         },
       },
@@ -2216,7 +2260,7 @@ export let corePlugins = {
           return {
             '--tw-backdrop-grayscale': `grayscale(${value})`,
             '@defaults backdrop-filter': {},
-            'backdrop-filter': 'var(--tw-backdrop-filter)',
+            'backdrop-filter': cssBackdropFilterValue,
           }
         },
       },
@@ -2231,7 +2275,7 @@ export let corePlugins = {
           return {
             '--tw-backdrop-hue-rotate': `hue-rotate(${value})`,
             '@defaults backdrop-filter': {},
-            'backdrop-filter': 'var(--tw-backdrop-filter)',
+            'backdrop-filter': cssBackdropFilterValue,
           }
         },
       },
@@ -2246,7 +2290,7 @@ export let corePlugins = {
           return {
             '--tw-backdrop-invert': `invert(${value})`,
             '@defaults backdrop-filter': {},
-            'backdrop-filter': 'var(--tw-backdrop-filter)',
+            'backdrop-filter': cssBackdropFilterValue,
           }
         },
       },
@@ -2261,7 +2305,7 @@ export let corePlugins = {
           return {
             '--tw-backdrop-opacity': `opacity(${value})`,
             '@defaults backdrop-filter': {},
-            'backdrop-filter': 'var(--tw-backdrop-filter)',
+            'backdrop-filter': cssBackdropFilterValue,
           }
         },
       },
@@ -2276,7 +2320,7 @@ export let corePlugins = {
           return {
             '--tw-backdrop-saturate': `saturate(${value})`,
             '@defaults backdrop-filter': {},
-            'backdrop-filter': 'var(--tw-backdrop-filter)',
+            'backdrop-filter': cssBackdropFilterValue,
           }
         },
       },
@@ -2291,7 +2335,7 @@ export let corePlugins = {
           return {
             '--tw-backdrop-sepia': `sepia(${value})`,
             '@defaults backdrop-filter': {},
-            'backdrop-filter': 'var(--tw-backdrop-filter)',
+            'backdrop-filter': cssBackdropFilterValue,
           }
         },
       },
@@ -2299,35 +2343,22 @@ export let corePlugins = {
     )
   },
 
-  backdropFilter: ({ addBase, addUtilities }) => {
-    addBase({
-      '@defaults backdrop-filter': {
-        '--tw-backdrop-blur': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-backdrop-brightness': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-backdrop-contrast': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-backdrop-grayscale': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-backdrop-hue-rotate': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-backdrop-invert': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-backdrop-opacity': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-backdrop-saturate': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-backdrop-sepia': 'var(--tw-empty,/*!*/ /*!*/)',
-        '--tw-backdrop-filter': [
-          'var(--tw-backdrop-blur)',
-          'var(--tw-backdrop-brightness)',
-          'var(--tw-backdrop-contrast)',
-          'var(--tw-backdrop-grayscale)',
-          'var(--tw-backdrop-hue-rotate)',
-          'var(--tw-backdrop-invert)',
-          'var(--tw-backdrop-opacity)',
-          'var(--tw-backdrop-saturate)',
-          'var(--tw-backdrop-sepia)',
-        ].join(' '),
-      },
+  backdropFilter: ({ addDefaults, addUtilities }) => {
+    addDefaults('backdrop-filter', {
+      '--tw-backdrop-blur': ' ',
+      '--tw-backdrop-brightness': ' ',
+      '--tw-backdrop-contrast': ' ',
+      '--tw-backdrop-grayscale': ' ',
+      '--tw-backdrop-hue-rotate': ' ',
+      '--tw-backdrop-invert': ' ',
+      '--tw-backdrop-opacity': ' ',
+      '--tw-backdrop-saturate': ' ',
+      '--tw-backdrop-sepia': ' ',
     })
     addUtilities({
       '.backdrop-filter': {
         '@defaults backdrop-filter': {},
-        'backdrop-filter': 'var(--tw-backdrop-filter)',
+        'backdrop-filter': cssBackdropFilterValue,
       },
       '.backdrop-filter-none': { 'backdrop-filter': 'none' },
     })

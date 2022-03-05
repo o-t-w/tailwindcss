@@ -6,6 +6,8 @@ import colors from '../public/colors'
 import { defaults } from './defaults'
 import { toPath } from './toPath'
 import { normalizeConfig } from './normalizeConfig'
+import isPlainObject from './isPlainObject'
+import { cloneDeep } from './cloneDeep'
 
 function isFunction(input) {
   return typeof input === 'function'
@@ -63,6 +65,36 @@ const configUtils = {
         }),
         {}
       )
+  },
+  rgb(property) {
+    if (!property.startsWith('--')) {
+      throw new Error(
+        'The rgb() helper requires a custom property name to be passed as the first argument.'
+      )
+    }
+
+    return ({ opacityValue }) => {
+      if (opacityValue === undefined || opacityValue === 1) {
+        return `rgb(var(${property}) / 1.0)`
+      }
+
+      return `rgb(var(${property}) / ${opacityValue})`
+    }
+  },
+  hsl(property) {
+    if (!property.startsWith('--')) {
+      throw new Error(
+        'The hsl() helper requires a custom property name to be passed as the first argument.'
+      )
+    }
+
+    return ({ opacityValue }) => {
+      if (opacityValue === undefined || opacityValue === 1) {
+        return `hsl(var(${property}) / 1)`
+      }
+
+      return `hsl(var(${property}) / ${opacityValue})`
+    }
   },
 }
 
@@ -144,7 +176,15 @@ function resolveFunctionKeys(object) {
       val = isFunction(val) ? val(resolvePath, configUtils) : val
     }
 
-    return val === undefined ? defaultValue : val
+    if (val === undefined) {
+      return defaultValue
+    }
+
+    if (isPlainObject(val)) {
+      return cloneDeep(val)
+    }
+
+    return val
   }
 
   resolvePath.theme = resolvePath

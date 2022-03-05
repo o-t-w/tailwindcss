@@ -27,6 +27,23 @@ describe('static build', () => {
     )
   })
 
+  it('should be possible to pipe in data', async () => {
+    await writeInputFile('index.html', html`<div class="font-bold"></div>`)
+
+    await $('cat ./src/index.css | node ../../lib/cli.js -i - -o ./dist/main.css', {
+      shell: true,
+      env: { NODE_ENV: 'production' },
+    })
+
+    expect(await readOutputFile('main.css')).toIncludeCss(
+      css`
+        .font-bold {
+          font-weight: 700;
+        }
+      `
+    )
+  })
+
   it('should safelist a list of classes to always include', async () => {
     await writeInputFile('index.html', html`<div class="font-bold"></div>`)
     await writeInputFile(
@@ -236,7 +253,7 @@ describe('watcher', () => {
   })
 
   test('classes are generated when the index.css file changes', async () => {
-    await writeInputFile('index.html', html`<div class="font-bold btn"></div>`)
+    await writeInputFile('index.html', html`<div class="btn font-bold"></div>`)
 
     let runningProcess = $('node ../../lib/cli.js -i ./src/index.css -o ./dist/main.css -w')
     await runningProcess.onStderr(ready)
@@ -258,7 +275,7 @@ describe('watcher', () => {
 
         @layer components {
           .btn {
-            @apply px-2 py-1 rounded;
+            @apply rounded px-2 py-1;
           }
         }
       `
@@ -289,7 +306,7 @@ describe('watcher', () => {
 
         @layer components {
           .btn {
-            @apply px-2 py-1 rounded bg-red-500;
+            @apply rounded bg-red-500 px-2 py-1;
           }
         }
       `

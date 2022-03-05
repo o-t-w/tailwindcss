@@ -19,6 +19,13 @@ import { toPath } from '../util/toPath'
 import log from '../util/log'
 import negateValue from '../util/negateValue'
 import isValidArbitraryValue from '../util/isValidArbitraryValue'
+import { generateRules } from './generateRules'
+import { hasContentChanged } from './cacheInvalidation.js'
+
+function prefix(context, selector) {
+  let prefix = context.tailwindConfig.prefix
+  return typeof prefix === 'function' ? prefix(selector) : prefix + selector
+}
 
 function parseVariantFormatString(input) {
   if (input.includes('{')) {
@@ -89,24 +96,37 @@ function getClasses(selector) {
   return parser.transformSync(selector)
 }
 
-function extractCandidates(node) {
+function extractCandidates(node, state = { containsNonOnDemandable: false }, depth = 0) {
   let classes = []
 
+  // Handle normal rules
   if (node.type === 'rule') {
     for (let selector of node.selectors) {
       let classCandidates = getClasses(selector)
       // At least one of the selectors contains non-"on-demandable" candidates.
-      if (classCandidates.length === 0) return []
+      if (classCandidates.length === 0) {
+        state.containsNonOnDemandable = true
+      }
 
-      classes = [...classes, ...classCandidates]
+      for (let classCandidate of classCandidates) {
+        classes.push(classCandidate)
+      }
     }
-    return classes
   }
 
-  if (node.type === 'atrule') {
+  // Handle at-rules (which contains nested rules)
+  else if (node.type === 'atrule') {
     node.walkRules((rule) => {
-      classes = [...classes, ...rule.selectors.flatMap((selector) => getClasses(selector))]
+      for (let classCandidate of rule.selectors.flatMap((selector) =>
+        getClasses(selector, state, depth + 1)
+      )) {
+        classes.push(classCandidate)
+      }
     })
+  }
+
+  if (depth === 0) {
+    return [state.containsNonOnDemandable || classes.length === 0, classes]
   }
 
   return classes
@@ -115,13 +135,16 @@ function extractCandidates(node) {
 function withIdentifiers(styles) {
   return parseStyles(styles).flatMap((node) => {
     let nodeMap = new Map()
-    let candidates = extractCandidates(node)
+    let [containsNonOnDemandableSelectors, candidates] = extractCandidates(node)
 
-    // If this isn't "on-demandable", assign it a universal candidate.
-    if (candidates.length === 0) {
-      return [['*', node]]
+    // If this isn't "on-demandable", assign it a universal candidate to always include it.
+    if (containsNonOnDemandableSelectors) {
+      candidates.unshift(sharedState.NOT_ON_DEMAND)
     }
 
+    // However, it could be that it also contains "on-demandable" candidates.
+    // E.g.: `span, .foo {}`, in that case it should still be possible to use
+    // `@apply foo` for example.
     return candidates.map((c) => {
       if (!nodeMap.has(node)) {
         nodeMap.set(node, node)
@@ -141,8 +164,8 @@ function buildPluginApi(tailwindConfig, context, { variantList, variantMap, offs
   }
 
   function prefixIdentifier(identifier, options) {
-    if (identifier === '*') {
-      return '*'
+    if (identifier === sharedState.NOT_ON_DEMAND) {
+      return sharedState.NOT_ON_DEMAND
     }
 
     if (!options.respectPrefix) {
@@ -208,17 +231,6 @@ function buildPluginApi(tailwindConfig, context, { variantList, variantMap, offs
       // Preserved for backwards compatibility but not used in v3.0+
       return []
     },
-    addUserCss(userCss) {
-      for (let [identifier, rule] of withIdentifiers(userCss)) {
-        let offset = offsets.user++
-
-        if (!context.candidateRuleMap.has(identifier)) {
-          context.candidateRuleMap.set(identifier, [])
-        }
-
-        context.candidateRuleMap.get(identifier).push([{ sort: offset, layer: 'user' }, rule])
-      }
-    },
     addBase(base) {
       for (let [identifier, rule] of withIdentifiers(base)) {
         let prefixedIdentifier = prefixIdentifier(identifier, {})
@@ -233,6 +245,27 @@ function buildPluginApi(tailwindConfig, context, { variantList, variantMap, offs
           .push([{ sort: offset, layer: 'base' }, rule])
       }
     },
+    /**
+     * @param {string} group
+     * @param {Record<string, string | string[]>} declarations
+     */
+    addDefaults(group, declarations) {
+      const groups = {
+        [`@defaults ${group}`]: declarations,
+      }
+
+      for (let [identifier, rule] of withIdentifiers(groups)) {
+        let prefixedIdentifier = prefixIdentifier(identifier, {})
+
+        if (!context.candidateRuleMap.has(prefixedIdentifier)) {
+          context.candidateRuleMap.set(prefixedIdentifier, [])
+        }
+
+        context.candidateRuleMap
+          .get(prefixedIdentifier)
+          .push([{ sort: offsets.base++, layer: 'defaults' }, rule])
+      }
+    },
     addComponents(components, options) {
       let defaultOptions = {
         respectPrefix: true,
@@ -243,7 +276,6 @@ function buildPluginApi(tailwindConfig, context, { variantList, variantMap, offs
 
       for (let [identifier, rule] of withIdentifiers(components)) {
         let prefixedIdentifier = prefixIdentifier(identifier, options)
-        let offset = offsets.components++
 
         classList.add(prefixedIdentifier)
 
@@ -253,7 +285,7 @@ function buildPluginApi(tailwindConfig, context, { variantList, variantMap, offs
 
         context.candidateRuleMap
           .get(prefixedIdentifier)
-          .push([{ sort: offset, layer: 'components', options }, rule])
+          .push([{ sort: offsets.components++, layer: 'components', options }, rule])
       }
     },
     addUtilities(utilities, options) {
@@ -266,7 +298,6 @@ function buildPluginApi(tailwindConfig, context, { variantList, variantMap, offs
 
       for (let [identifier, rule] of withIdentifiers(utilities)) {
         let prefixedIdentifier = prefixIdentifier(identifier, options)
-        let offset = offsets.utilities++
 
         classList.add(prefixedIdentifier)
 
@@ -276,7 +307,7 @@ function buildPluginApi(tailwindConfig, context, { variantList, variantMap, offs
 
         context.candidateRuleMap
           .get(prefixedIdentifier)
-          .push([{ sort: offset, layer: 'utilities', options }, rule])
+          .push([{ sort: offsets.utilities++, layer: 'utilities', options }, rule])
       }
     },
     matchUtilities: function (utilities, options) {
@@ -413,7 +444,14 @@ function trackModified(files, fileModifiedMap) {
     let parsed = url.parse(file)
     let pathname = parsed.hash ? parsed.href.replace(parsed.hash, '') : parsed.href
     pathname = parsed.search ? pathname.replace(parsed.search, '') : pathname
-    let newModified = fs.statSync(decodeURIComponent(pathname)).mtimeMs
+    let newModified = fs.statSync(decodeURIComponent(pathname), { throwIfNoEntry: false })?.mtimeMs
+    if (!newModified) {
+      // It could happen that a file is passed in that doesn't exist. E.g.:
+      // postcss-cli will provide you a fake path when reading from stdin. This
+      // path then looks like /path-to-your-project/stdin In that case we just
+      // want to ignore it and don't track changes at all.
+      continue
+    }
 
     if (!fileModifiedMap.has(file) || newModified > fileModifiedMap.get(file)) {
       changed = true
@@ -473,15 +511,6 @@ function collectLayerPlugins(root) {
     }
   })
 
-  root.walkRules((rule) => {
-    // At this point it is safe to include all the left-over css from the
-    // user's css file. This is because the `@tailwind` and `@layer` directives
-    // will already be handled and will be removed from the css tree.
-    layerPlugins.push(function ({ addUserCss }) {
-      addUserCss(rule, { respectPrefix: false })
-    })
-  })
-
   return layerPlugins
 }
 
@@ -528,6 +557,7 @@ function registerPlugins(plugins, context) {
   let variantList = []
   let variantMap = new Map()
   let offsets = {
+    defaults: 0n,
     base: 0n,
     components: 0n,
     utilities: 0n,
@@ -555,6 +585,7 @@ function registerPlugins(plugins, context) {
 
   let highestOffset = ((args) => args.reduce((m, e) => (e > m ? e : m)))([
     offsets.base,
+    offsets.defaults,
     offsets.components,
     offsets.utilities,
     offsets.user,
@@ -566,13 +597,14 @@ function registerPlugins(plugins, context) {
   context.arbitraryPropertiesSort = ((1n << reservedBits) << 0n) - 1n
 
   context.layerOrder = {
-    base: (1n << reservedBits) << 0n,
-    components: (1n << reservedBits) << 1n,
-    utilities: (1n << reservedBits) << 2n,
-    user: (1n << reservedBits) << 3n,
+    defaults: (1n << reservedBits) << 0n,
+    base: (1n << reservedBits) << 1n,
+    components: (1n << reservedBits) << 2n,
+    utilities: (1n << reservedBits) << 3n,
+    user: (1n << reservedBits) << 4n,
   }
 
-  reservedBits += 4n
+  reservedBits += 5n
 
   let offset = 0
   context.variantOrder = new Map(
@@ -611,7 +643,7 @@ function registerPlugins(plugins, context) {
         log.warn('root-regex', [
           'Regular expressions in `safelist` work differently in Tailwind CSS v3.0.',
           'Update your `safelist` configuration to eliminate this warning.',
-          // TODO: Add https://tw.wtf/regex-safelist
+          'https://tailwindcss.com/docs/content-configuration#safelisting-classes',
         ])
         continue
       }
@@ -621,12 +653,33 @@ function registerPlugins(plugins, context) {
 
     if (checks.length > 0) {
       let patternMatchingCount = new Map()
+      let prefixLength = context.tailwindConfig.prefix.length
 
       for (let util of classList) {
         let utils = Array.isArray(util)
           ? (() => {
               let [utilName, options] = util
-              return Object.keys(options?.values ?? {}).map((value) => formatClass(utilName, value))
+              let values = Object.keys(options?.values ?? {})
+              let classes = values.map((value) => formatClass(utilName, value))
+
+              if (options?.supportsNegativeValues) {
+                // This is the normal negated version
+                // e.g. `-inset-1` or `-tw-inset-1`
+                classes = [...classes, ...classes.map((cls) => '-' + cls)]
+
+                // This is the negated version *after* the prefix
+                // e.g. `tw--inset-1`
+                // The prefix is already attached to util name
+                // So we add the negative after the prefix
+                classes = [
+                  ...classes,
+                  ...classes.map(
+                    (cls) => cls.slice(0, prefixLength) + '-' + cls.slice(prefixLength)
+                  ),
+                ]
+              }
+
+              return classes
             })()
           : [util]
 
@@ -661,14 +714,41 @@ function registerPlugins(plugins, context) {
         log.warn([
           `The safelist pattern \`${regex}\` doesn't match any Tailwind CSS classes.`,
           'Fix this pattern or remove it from your `safelist` configuration.',
+          'https://tailwindcss.com/docs/content-configuration#safelisting-classes',
         ])
       }
     }
   }
 
+  // A list of utilities that are used by certain Tailwind CSS utilities but
+  // that don't exist on their own. This will result in them "not existing" and
+  // sorting could be weird since you still require them in order to make the
+  // host utitlies work properly. (Thanks Biology)
+  let parasiteUtilities = new Set([prefix(context, 'group'), prefix(context, 'peer')])
+  context.getClassOrder = function getClassOrder(classes) {
+    let sortedClassNames = new Map()
+    for (let [sort, rule] of generateRules(new Set(classes), context)) {
+      if (sortedClassNames.has(rule.raws.tailwind.candidate)) continue
+      sortedClassNames.set(rule.raws.tailwind.candidate, sort)
+    }
+
+    return classes.map((className) => {
+      let order = sortedClassNames.get(className) ?? null
+
+      if (order === null && parasiteUtilities.has(className)) {
+        // This will make sure that it is at the very beginning of the
+        // `components` layer which technically means 'before any
+        // components'.
+        order = context.layerOrder.components
+      }
+
+      return [className, order]
+    })
+  }
+
   // Generate a list of strings for autocompletion purposes, e.g.
   // ['uppercase', 'lowercase', ...]
-  context.getClassList = function () {
+  context.getClassList = function getClassList() {
     let output = []
 
     for (let util of classList) {
@@ -743,6 +823,8 @@ export function getContext(
     existingContext = context
   }
 
+  let cssDidChange = hasContentChanged(sourcePath, root)
+
   // If there's already a context in the cache and we don't need to
   // reset the context, return the cached context.
   if (existingContext) {
@@ -750,7 +832,7 @@ export function getContext(
       [...contextDependencies],
       getFileModifiedMap(existingContext)
     )
-    if (!contextDependenciesChanged) {
+    if (!contextDependenciesChanged && !cssDidChange) {
       return [existingContext, false]
     }
   }
